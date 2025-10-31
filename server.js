@@ -85,7 +85,7 @@ async function initializeDatabase() {
           weight DOUBLE PRECISION,
           wins INTEGER DEFAULT 0,
           losses INTEGER DEFAULT 0,
-          emaaccuracy DOUBLE PRECISION DEFAULT 0.5,
+          ema_accuracy DOUBLE PRECISION DEFAULT 0.5,
           updated_at TIMESTAMPTZ DEFAULT NOW()
         );
 
@@ -103,6 +103,68 @@ async function initializeDatabase() {
     console.error('❌ Database initialization failed:', err.message);
     pool = null;
     return null;
+  }
+}
+
+// Ensure table structure has all required columns
+async function ensureTableStructure() {
+  if (!pool) return;
+  
+  try {
+    const client = await pool.connect();
+    try {
+      // Check if model_id column exists in predictions table
+      const { rows } = await client.query(`
+        SELECT column_name 
+        FROM information_schema.columns 
+        WHERE table_name = 'predictions' AND column_name = 'model_id'
+      `);
+      
+      if (rows.length === 0) {
+        console.log('🔄 Adding missing model_id column to predictions table...');
+        await client.query(`
+          ALTER TABLE predictions 
+          ADD COLUMN model_id TEXT
+        `);
+        console.log('✅ Added model_id column to predictions table');
+      }
+
+      // Check if contributors column exists
+      const { rows: contributorsCheck } = await client.query(`
+        SELECT column_name 
+        FROM information_schema.columns 
+        WHERE table_name = 'predictions' AND column_name = 'contributors'
+      `);
+      
+      if (contributorsCheck.length === 0) {
+        console.log('🔄 Adding missing contributors column to predictions table...');
+        await client.query(`
+          ALTER TABLE predictions 
+          ADD COLUMN contributors JSONB
+        `);
+        console.log('✅ Added contributors column to predictions table');
+      }
+
+      // Check if ema_accuracy column exists in models table
+      const { rows: emaCheck } = await client.query(`
+        SELECT column_name 
+        FROM information_schema.columns 
+        WHERE table_name = 'models' AND column_name = 'ema_accuracy'
+      `);
+      
+      if (emaCheck.length === 0) {
+        console.log('🔄 Adding missing ema_accuracy column to models table...');
+        await client.query(`
+          ALTER TABLE models 
+          ADD COLUMN ema_accuracy DOUBLE PRECISION DEFAULT 0.5
+        `);
+        console.log('✅ Added ema_accuracy column to models table');
+      }
+    } finally {
+      client.release();
+    }
+  } catch (err) {
+    console.error('Error ensuring table structure:', err.message);
   }
 }
 
@@ -455,12 +517,12 @@ app.get('/history', async (req, res) => {
 
 app.get('/models/stats', async (req, res) => {
   try {
-    const runtime = modelManager.stats();
+    const runtime = modelManager.dumpModelState ? modelManager.dumpModelState() : [];
     let persisted = [];
     
     if (pool) {
       const { rows } = await pool.query(
-        'SELECT id, name, weight, wins, losses, emaaccuracy, updated_at FROM models'
+        'SELECT id, name, weight, wins, losses, ema_accuracy, updated_at FROM models'
       );
       persisted = rows;
     }
@@ -510,6 +572,9 @@ async function startServer() {
   try {
     // Initialize database first
     await initializeDatabase();
+    
+    // Ensure table structure is correct
+    await ensureTableStructure();
     
     // Initialize model manager with database pool
     if (pool) {
